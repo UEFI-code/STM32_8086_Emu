@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #define MEM_SIZE 4096 // 4KB virtual memory
 #define IVT_SIZE 256*4
@@ -12,25 +13,77 @@ uint16_t cs, ds, ss, es;
 uint16_t ip;
 uint16_t flags;
 
+static uint16_t read_imm16(uint16_t addr)
+{
+    return mem[addr] | (mem[addr + 1] << 8);
+}
+
+static void dump_regs(void)
+{
+    printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X\n", ax, bx, cx, dx, sp, ip);
+}
+
 int main() {
     printf("Entered 8086 emulator\n");
-    mem[IVT_SIZE] = 0x90; // NOP instruction at the start of the code memory
-    ip = IVT_SIZE; // Set instruction pointer to the start of the code memory
+
+    mem[IVT_SIZE] = 0x90; // NOP
+
+    mem[IVT_SIZE+1] = 0xB8; // MOV AX, 0x1234
+    mem[IVT_SIZE+2] = 0x34;
+    mem[IVT_SIZE+3] = 0x12;
+
+    mem[IVT_SIZE+4] = 0xBB; // MOV BX, 0x5678
+    mem[IVT_SIZE+5] = 0x78;
+    mem[IVT_SIZE+6] = 0x56;
+
+    mem[IVT_SIZE+7] = 0x40; // INC AX
+    mem[IVT_SIZE+8] = 0x4B; // DEC BX
+    mem[IVT_SIZE+9] = 0x90; // NOP
+    mem[IVT_SIZE+10] = 0xF4; // HLT
+
+    ip = IVT_SIZE;
     printf("Starting execution at IP: 0x%04X\n", ip);
     while (ip + 6 < MEM_SIZE) 
     {
         switch (mem[ip])
         {
             case 0x90: // NOP
-                printf("NOP executed at IP: 0x%04X\n", ip);
+                printf("NOP at IP: 0x%04X\n", ip);
                 ip++;
+                break;
+            case 0xF4: // HLT
+                sleep(1);
+                printf("HLT at IP: 0x%04X\n", ip);
+                ip++;
+                break;
+            case 0x40: // INC AX
+                ax++;
+                printf("INC AX -> 0x%04X\n", ax);
+                ip++;
+                break;
+            case 0x4B: // DEC BX
+                bx--;
+                printf("DEC BX -> 0x%04X\n", bx);
+                ip++;
+                break;
+            case 0xB8: // MOV AX, imm16
+                ax = read_imm16(ip + 1);
+                printf("MOV AX, 0x%04X\n", ax);
+                ip += 3;
+                break;
+            case 0xBB: // MOV BX, imm16
+                bx = read_imm16(ip + 1);
+                printf("MOV BX, 0x%04X\n", bx);
+                ip += 3;
                 break;
             default:
                 printf("Unknown opcode: 0x%02X at IP: 0x%04X\n", mem[ip], ip);
                 // should we goto exception handler?
                 goto fin;
         }
+        dump_regs();
     }
-    fin:
+fin:
     printf("Quitting emulator\n");
+    return 0;
 }
