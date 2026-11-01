@@ -23,6 +23,8 @@ static void dump_regs(void)
     printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X\n", ax, bx, cx, dx, sp, ip);
 }
 
+#define PHY_IP ((cs << 4) + ip)
+
 int main() {
     printf("Entered 8086 emulator\n");
 
@@ -45,15 +47,15 @@ int main() {
     printf("Starting execution at IP: 0x%04X\n", ip);
     while (ip + 6 < MEM_SIZE) 
     {
-        switch (mem[ip])
+        switch (mem[PHY_IP])
         {
             case 0x90: // NOP
-                printf("NOP at IP: 0x%04X\n", ip);
+                printf("NOP at CS:IP 0x%04X:0x%04X\n", cs, ip);
                 ip++;
                 break;
             case 0xF4: // HLT
                 sleep(1);
-                printf("HLT at IP: 0x%04X\n", ip);
+                printf("HLT at CS:IP 0x%04X:0x%04X\n", cs, ip);
                 ip++;
                 break;
             case 0x40: // INC AX
@@ -67,17 +69,17 @@ int main() {
                 ip++;
                 break;
             case 0xB8: // MOV AX, imm16
-                ax = read_imm16(ip + 1);
+                ax = read_imm16(PHY_IP + 1);
                 printf("MOV AX, 0x%04X\n", ax);
                 ip += 3;
                 break;
             case 0xBB: // MOV BX, imm16
-                bx = read_imm16(ip + 1);
+                bx = read_imm16(PHY_IP + 1);
                 printf("MOV BX, 0x%04X\n", bx);
                 ip += 3;
                 break;
             default:
-                printf("Unknown opcode: 0x%02X at IP: 0x%04X\n", mem[ip], ip);
+                printf("Unknown opcode: 0x%02X at CS:IP 0x%04X:0x%04X\n", mem[PHY_IP], cs, ip);
                 // should we goto exception handler?
                 goto fin;
         }
