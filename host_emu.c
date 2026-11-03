@@ -13,6 +13,10 @@ uint16_t cs, ds, ss, es;
 uint16_t ip;
 uint16_t flags;
 
+#define FLAG_CF 0x0001
+#define FLAG_SF 0x0080
+#define FLAG_ZF 0x0040
+
 static uint16_t read_imm16(uint16_t addr)
 {
     return mem[addr] | (mem[addr + 1] << 8);
@@ -20,10 +24,20 @@ static uint16_t read_imm16(uint16_t addr)
 
 static void dump_regs(void)
 {
-    printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X\n", ax, bx, cx, dx, sp, ip);
+    printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X CF=%d ZF=%d SF=%d\n",
+           ax,
+           bx,
+           cx,
+           dx,
+           sp,
+           ip,
+           (flags & FLAG_CF) ? 1 : 0,
+           (flags & FLAG_ZF) ? 1 : 0,
+           (flags & FLAG_SF) ? 1 : 0);
 }
 
 #define PHY_IP ((cs << 4) + ip)
+#define PHY_SP ((ss << 4) + sp)
 
 int main() {
     printf("Entered 8086 emulator\n");
@@ -62,8 +76,40 @@ int main() {
     mem[IVT_SIZE+22] = 0x90; // skipped NOP
     mem[IVT_SIZE+23] = 0x90; // skipped NOP
 
-    mem[IVT_SIZE+24] = 0x90; // NOP
-    mem[IVT_SIZE+25] = 0xF4; // HLT
+    mem[IVT_SIZE+24] = 0x31; // XOR AX, AX
+
+    mem[IVT_SIZE+25] = 0xB9; // MOV CX, 0x0003
+    mem[IVT_SIZE+26] = 0x03;
+    mem[IVT_SIZE+27] = 0x00;
+
+    mem[IVT_SIZE+28] = 0x41; // INC CX
+    mem[IVT_SIZE+29] = 0x49; // DEC CX
+
+    mem[IVT_SIZE+30] = 0x92; // XCHG AX, DX
+
+    mem[IVT_SIZE+31] = 0x04; // ADD AL, 0x10
+    mem[IVT_SIZE+32] = 0x10;
+
+    mem[IVT_SIZE+33] = 0x3D; // CMP AX, 0x0010
+    mem[IVT_SIZE+34] = 0x10;
+    mem[IVT_SIZE+35] = 0x00;
+
+    mem[IVT_SIZE+36] = 0x74; // JZ +3
+    mem[IVT_SIZE+37] = 0x03;
+
+    mem[IVT_SIZE+38] = 0x90; // skipped NOP
+    mem[IVT_SIZE+39] = 0x90; // skipped NOP
+    mem[IVT_SIZE+40] = 0x90; // skipped NOP
+
+    mem[IVT_SIZE+41] = 0xE8; // CALL +2
+    mem[IVT_SIZE+42] = 0x02;
+    mem[IVT_SIZE+43] = 0x00;
+
+    mem[IVT_SIZE+44] = 0x90; // NOP
+    mem[IVT_SIZE+45] = 0xF4; // HLT
+
+    mem[IVT_SIZE+46] = 0x40; // INC AX
+    mem[IVT_SIZE+47] = 0xC3; // RET
 
     ip = IVT_SIZE;
     printf("Starting execution at IP: 0x%04X\n", ip);
@@ -84,6 +130,16 @@ int main() {
                 printf("INC AX -> 0x%04X\n", ax);
                 ip++;
                 break;
+            case 0x41: // INC CX
+                cx++;
+                printf("INC CX -> 0x%04X\n", cx);
+                ip++;
+                break;
+            case 0x49: // DEC CX
+                cx--;
+                printf("DEC CX -> 0x%04X\n", cx);
+                ip++;
+                break;
             case 0x4B: // DEC BX
                 bx--;
                 printf("DEC BX -> 0x%04X\n", bx);
@@ -91,17 +147,57 @@ int main() {
                 break;
             case 0x05: // ADD AX, imm16
                 ax += read_imm16(PHY_IP + 1);
+                flags = (ax == 0) ? (flags | FLAG_ZF) : (flags & ~FLAG_ZF);
                 printf("ADD AX -> 0x%04X\n", ax);
                 ip += 3;
                 break;
+            case 0x04: // ADD AL, imm8
+                ax = (ax & 0xFF00) | ((ax + mem[PHY_IP + 1]) & 0x00FF);
+                printf("ADD AL -> 0x%02X\n", ax & 0xFF);
+                ip += 2;
+                break;
             case 0x2D: // SUB AX, imm16
                 ax -= read_imm16(PHY_IP + 1);
+                flags = (ax == 0) ? (flags | FLAG_ZF) : (flags & ~FLAG_ZF);
                 printf("SUB AX -> 0x%04X\n", ax);
                 ip += 3;
                 break;
+            case 0x3D: // CMP AX, imm16
+            {
+                flags &= ~(FLAG_CF | FLAG_ZF | FLAG_SF);
+                uint16_t value = read_imm16(PHY_IP + 1);
+                if (ax == value)
+                    flags |= FLAG_ZF;
+                if (ax < value)
+                    flags |= FLAG_CF;
+                if ((ax - value) & 0x8000)
+                    flags |= FLAG_SF;
+                printf("CMP AX, 0x%04X\n", value);
+                ip += 3;
+                break;
+            }
+            case 0x31: // XOR AX, AX
+                ax = 0;
+                printf("XOR AX, AX\n");
+                ip++;
+                break;
+            case 0x92: // XCHG AX, DX
+            {
+                uint16_t tmp = ax;
+                ax = dx;
+                dx = tmp;
+                printf("XCHG AX, DX\n");
+                ip++;
+                break;
+            }
             case 0xB8: // MOV AX, imm16
                 ax = read_imm16(PHY_IP + 1);
                 printf("MOV AX, 0x%04X\n", ax);
+                ip += 3;
+                break;
+            case 0xB9: // MOV CX, imm16
+                cx = read_imm16(PHY_IP + 1);
+                printf("MOV CX, 0x%04X\n", cx);
                 ip += 3;
                 break;
             case 0xBB: // MOV BX, imm16
@@ -116,17 +212,46 @@ int main() {
                 break;
             case 0x50: // PUSH AX
                 sp -= 2;
-                mem[(ss << 4) + sp] = ax & 0xFF;
-                mem[(ss << 4) + sp + 1] = ax >> 8;
+                mem[PHY_SP] = ax & 0xFF;
+                mem[PHY_SP + 1] = ax >> 8;
                 printf("PUSH AX\n");
                 ip++;
                 break;
             case 0x58: // POP AX
-                ax = mem[(ss << 4) + sp] | (mem[(ss << 4) + sp + 1] << 8);
+                ax = mem[PHY_SP] | (mem[PHY_SP + 1] << 8);
                 sp += 2;
                 printf("POP AX -> 0x%04X\n", ax);
                 ip++;
                 break;
+            case 0x74: // JZ short
+                if (flags & FLAG_ZF)
+                {
+                    printf("JZ taken\n");
+                    ip += 2 + (int8_t)mem[PHY_IP + 1];
+                }
+                else
+                {
+                    printf("JZ not taken\n");
+                    ip += 2;
+                }
+                break;
+            case 0xC3: // RET
+                ip = mem[PHY_SP] | (mem[PHY_SP + 1] << 8);
+                sp += 2;
+                printf("RET\n");
+                break;
+            case 0xE8: // CALL near
+            {
+                uint16_t return_ip = ip + 3;
+
+                sp -= 2;
+                mem[PHY_SP] = return_ip & 0xFF;
+                mem[PHY_SP + 1] = return_ip >> 8;
+
+                ip += 3 + (int16_t)read_imm16(PHY_IP + 1);
+                printf("CALL near\n");
+                break;
+            }
             case 0xEB: // JMP short
                 printf("JMP short %d\n", (int8_t)mem[PHY_IP + 1]);
                 ip += 2 + (int8_t)mem[PHY_IP + 1];
