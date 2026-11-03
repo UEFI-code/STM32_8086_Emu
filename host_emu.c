@@ -245,9 +245,12 @@ int main() {
                 if (ax == value)
                     flags |= FLAG_ZF;
                 if (ax < value)
-                    flags |= FLAG_CF;
-                if ((ax - value) & 0x8000)
-                    flags |= FLAG_SF;
+                {
+                    flags |= FLAG_CF; // set carry flag if AX < value
+                    flags |= FLAG_SF; // set sign flag if AX < value
+                }
+                if (((ax ^ value) & (ax ^ (ax - value))) & 0x8000) // overflow check
+                    flags |= FLAG_OF;
                 printf("CMP AX, 0x%04X\n", value);
                 ip += 3;
                 break;
