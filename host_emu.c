@@ -1,9 +1,16 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define MEM_SIZE 4096 // 4KB virtual memory
 #define IVT_SIZE 256*4
+
+#define FLAG_CF 0x0001
+#define FLAG_ZF 0x0040
+#define FLAG_SF 0x0080
+#define FLAG_OF 0x0800
+#define FLAG_IF 0x0200
 
 uint8_t mem[MEM_SIZE] = {0};
 
@@ -13,34 +20,72 @@ uint16_t cs, ds, ss, es;
 uint16_t ip;
 uint16_t flags;
 
-#define FLAG_CF 0x0001
-#define FLAG_SF 0x0080
-#define FLAG_ZF 0x0040
+uint8_t has_interrupt, int_num;
+
+void raise_interrupt(uint8_t num)
+{
+    if (flags & FLAG_IF)
+    {
+        has_interrupt = 1;
+        int_num = num;
+        printf("Interrupt %d raised\n", num);
+    }
+}
+
+void interrupt_trigger()
+{
+    printf("Interrupt trigger thread started\n");
+    while (1)
+    {
+        sleep(5);
+        raise_interrupt(0x08);
+    }
+}
+
+static void dump_regs(void)
+{
+    printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X CF=%d ZF=%d SF=%d OF=%d IF=%d\n",
+        ax,
+        bx,
+        cx,
+        dx,
+        sp,
+        ip,
+        (flags & FLAG_CF) ? 1 : 0,
+        (flags & FLAG_ZF) ? 1 : 0,
+        (flags & FLAG_SF) ? 1 : 0,
+        (flags & FLAG_OF) ? 1 : 0,
+        (flags & FLAG_IF) ? 1 : 0
+    );
+}
+
+#define PHY_IP ((cs << 4) + ip)
+#define PHY_SP ((ss << 4) + sp)
 
 static uint16_t read_imm16(uint16_t addr)
 {
     return mem[addr] | (mem[addr + 1] << 8);
 }
 
-static void dump_regs(void)
+static void push16(uint16_t value)
 {
-    printf("AX=%04X BX=%04X CX=%04X DX=%04X SP=%04X IP=%04X CF=%d ZF=%d SF=%d\n",
-           ax,
-           bx,
-           cx,
-           dx,
-           sp,
-           ip,
-           (flags & FLAG_CF) ? 1 : 0,
-           (flags & FLAG_ZF) ? 1 : 0,
-           (flags & FLAG_SF) ? 1 : 0);
+    sp -= 2;
+    mem[PHY_SP] = value & 0xFF;
+    mem[PHY_SP + 1] = value >> 8;
 }
 
-#define PHY_IP ((cs << 4) + ip)
-#define PHY_SP ((ss << 4) + sp)
+static uint16_t pop16(void)
+{
+    uint16_t value = mem[PHY_SP] | (mem[PHY_SP + 1] << 8);
+    sp += 2;
+    return value;
+}
 
 int main() {
     printf("Entered 8086 emulator\n");
+    // create a thread to trigger interrupts
+    pthread_t interrupt_thread;
+    pthread_create(&interrupt_thread, NULL, (void *(*)(void *))interrupt_trigger, NULL);
 
     mem[IVT_SIZE] = 0x90; // NOP
 
@@ -106,15 +151,45 @@ int main() {
     mem[IVT_SIZE+43] = 0x00;
 
     mem[IVT_SIZE+44] = 0x90; // NOP
-    mem[IVT_SIZE+45] = 0xF4; // HLT
+    mem[IVT_SIZE+45] = 0x90; // NOP
+    mem[IVT_SIZE+46] = 0xFA; // CLI
+    mem[IVT_SIZE+47] = 0xFB; // STI
 
-    mem[IVT_SIZE+46] = 0x40; // INC AX
-    mem[IVT_SIZE+47] = 0xC3; // RET
+    mem[IVT_SIZE+48] = 0xF4; // HLT
+    mem[IVT_SIZE+49] = 0x40; // INC AX
+    mem[IVT_SIZE+50] = 0xEB; // JMP -4
+    mem[IVT_SIZE+51] = -4;
+
+    // interrupt vector 0x08 -> 0000:0200
+    mem[0x08 * 4] = 0x00;
+    mem[0x08 * 4 + 1] = 0x02;
+    mem[0x08 * 4 + 2] = 0x00;
+    mem[0x08 * 4 + 3] = 0x00;
+
+    // handler set ax to 0x2333
+    mem[0x0200] = 0xB8; // MOV AX, 0x2333
+    mem[0x0201] = 0x33;
+    mem[0x0202] = 0x23;
+    mem[0x0203] = 0xCF; // IRET
 
     ip = IVT_SIZE;
     printf("Starting execution at IP: 0x%04X\n", ip);
     while (ip + 6 < MEM_SIZE) 
     {
+        // check for interrupts first
+        if (has_interrupt)
+        {
+            has_interrupt = 0;
+            push16(flags);
+            flags &= ~(FLAG_IF);
+            push16(cs);
+            push16(ip);
+            // set CS:IP to interrupt vector
+            ip = read_imm16(int_num * 4);
+            cs = read_imm16(int_num * 4 + 2);
+            printf("Jumping to interrupt handler at CS:IP 0x%04X:0x%04X\n", cs, ip);
+            continue;
+        }
         switch (mem[PHY_IP])
         {
             case 0x90: // NOP
@@ -124,7 +199,8 @@ int main() {
             case 0xF4: // HLT
                 sleep(1);
                 printf("HLT at CS:IP 0x%04X:0x%04X\n", cs, ip);
-                goto fin;
+                ip++;
+                break;
             case 0x40: // INC AX
                 ax++;
                 printf("INC AX -> 0x%04X\n", ax);
@@ -211,15 +287,12 @@ int main() {
                 ip += 3;
                 break;
             case 0x50: // PUSH AX
-                sp -= 2;
-                mem[PHY_SP] = ax & 0xFF;
-                mem[PHY_SP + 1] = ax >> 8;
+                push16(ax);
                 printf("PUSH AX\n");
                 ip++;
                 break;
             case 0x58: // POP AX
-                ax = mem[PHY_SP] | (mem[PHY_SP + 1] << 8);
-                sp += 2;
+                ax = pop16();
                 printf("POP AX -> 0x%04X\n", ax);
                 ip++;
                 break;
@@ -236,22 +309,35 @@ int main() {
                 }
                 break;
             case 0xC3: // RET
-                ip = mem[PHY_SP] | (mem[PHY_SP + 1] << 8);
-                sp += 2;
+                ip = pop16();
                 printf("RET\n");
+                break;
+            case 0xCF: // IRET
+                ip = pop16();
+                cs = pop16();
+                flags = pop16();
+                printf("IRET -> CS:IP 0x%04X:0x%04X\n", cs, ip);
                 break;
             case 0xE8: // CALL near
             {
                 uint16_t return_ip = ip + 3;
 
-                sp -= 2;
-                mem[PHY_SP] = return_ip & 0xFF;
-                mem[PHY_SP + 1] = return_ip >> 8;
+                push16(return_ip);
 
                 ip += 3 + (int16_t)read_imm16(PHY_IP + 1);
                 printf("CALL near\n");
                 break;
             }
+            case 0xFA: // CLI
+                flags &= ~FLAG_IF;
+                printf("CLI -> IF=0\n");
+                ip++;
+                break;
+            case 0xFB: // STI
+                flags |= FLAG_IF;
+                printf("STI -> IF=1\n");
+                ip++;
+                break;
             case 0xEB: // JMP short
                 printf("JMP short %d\n", (int8_t)mem[PHY_IP + 1]);
                 ip += 2 + (int8_t)mem[PHY_IP + 1];
