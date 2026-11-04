@@ -81,6 +81,21 @@ static uint16_t pop16(void)
     return value;
 }
 
+static uint16_t do_sub(uint16_t a, uint16_t b)
+{
+    flags &= ~(FLAG_CF | FLAG_ZF | FLAG_SF);
+    if (a == b)
+        flags |= FLAG_ZF;
+    if (a < b)
+    {
+        flags |= FLAG_CF; // set carry flag if AX < value
+        flags |= FLAG_SF; // set sign flag if AX < value
+    }
+    if (((a ^ b) & (a ^ (a - b))) & 0x8000) // overflow check
+        flags |= FLAG_OF;
+    return a - b;
+}
+
 int main() {
     printf("Entered 8086 emulator\n");
     // create a thread to trigger interrupts
@@ -233,24 +248,17 @@ int main() {
                 ip += 2;
                 break;
             case 0x2D: // SUB AX, imm16
-                ax -= read_imm16(PHY_IP + 1);
-                flags = (ax == 0) ? (flags | FLAG_ZF) : (flags & ~FLAG_ZF);
-                printf("SUB AX -> 0x%04X\n", ax);
+            {
+                uint16_t value = read_imm16(PHY_IP + 1);
+                ax = do_sub(ax, value);
+                printf("SUB AX, 0x%04X -> 0x%04X\n", value, ax);
                 ip += 3;
                 break;
+            }
             case 0x3D: // CMP AX, imm16
             {
-                flags &= ~(FLAG_CF | FLAG_ZF | FLAG_SF);
                 uint16_t value = read_imm16(PHY_IP + 1);
-                if (ax == value)
-                    flags |= FLAG_ZF;
-                if (ax < value)
-                {
-                    flags |= FLAG_CF; // set carry flag if AX < value
-                    flags |= FLAG_SF; // set sign flag if AX < value
-                }
-                if (((ax ^ value) & (ax ^ (ax - value))) & 0x8000) // overflow check
-                    flags |= FLAG_OF;
+                do_sub(ax, value);
                 printf("CMP AX, 0x%04X\n", value);
                 ip += 3;
                 break;
